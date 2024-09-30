@@ -1,190 +1,349 @@
 <?php
+
 /**
- * Class PHLS
- * Author: Sakibur Rahman @sakibweb
- * The PHLS class provides methods to manage stored values with expiration times.
+ * PHSD is a PHP Library for handling local data storage with expiration.
+ * 
+ * @category Library
+ * @package  PHSD
  */
- 
 class PHLS {
-    /** @var array $storage The storage for values with expiration times. */
-    private static $storage = [];
+    private static $data = [];
+    private static $file = '.env';
 
     /**
-     * Add a value to the storage with an optional expiration time.
+     * Initialize the data storage from the file.
+     */
+    private static function init() {
+        if (file_exists(self::$file)) {
+            self::$data = json_decode(file_get_contents(self::$file), true) ?: [];
+        } else {
+            self::$data = [];
+        }
+        self::expireAllExpired();
+    }
+
+    /**
+     * Parse a nested key string into an array of keys.
+     * Example: 'user=>settings=>theme' => ['user', 'settings', 'theme']
      *
-     * @param string $key The key to store the value.
-     * @param mixed $value The value to store.
-     * @param int|null $expiration The expiration time for the value in minutes. If 0, value is removed immediately.
+     * @param string $key The nested key string.
+     * @return array An array of individual keys.
+     */
+    private static function parseNestedKey($key) {
+        return explode('=>', $key);
+    }
+
+    /**
+     * Save the data storage to the file, each data on a new line.
+     */
+    private static function save() {
+        $jsonData = json_encode(self::$data, JSON_PRETTY_PRINT);
+        file_put_contents(self::$file, $jsonData . PHP_EOL);
+    }
+
+    /**
+     * Add a key-value pair to the data storage with optional expiration.
+     * Supports nested keys (e.g., 'user=>settings=>theme').
+     *
+     * @param string $key The key to add.
+     * @param mixed $value The value to add.
+     * @param int|null $expiration Expiration time in minutes (optional).
+     * @param bool $array If true, allow multiple values on a key; otherwise, overwrite existing values.
      * @return void
      */
-    public static function add($key, $value, $expiration = null) {
-        if ($expiration === 0) {
-            self::remove($key);
+    public static function add($key, $value, $expiration = null, $array = false) {
+        self::init();
+        self::expireAllExpired();
+        $keys = self::parseNestedKey($key);
+        $dataPointer = &self::$data;
+
+        foreach ($keys as $keyPart) {
+            if (!isset($dataPointer[$keyPart])) {
+                $dataPointer[$keyPart] = [];
+            }
+            $dataPointer = &$dataPointer[$keyPart];
+        }
+
+        if ($array) {
+            $dataPointer[] = [
+                'value' => $value,
+                'expiration' => self::calculateExpiration($expiration)
+            ];
         } else {
-            self::$storage[$key] = [
+            $dataPointer = [
                 'value' => $value,
                 'expiration' => self::calculateExpiration($expiration)
             ];
         }
+
+        self::save();
     }
 
     /**
-     * Update a value associated with a key in the storage.
+     * Add a new value under a key while limiting the maximum number of values.
+     * New values are added at the beginning; if the array exceeds the limit, older values are removed.
      *
-     * @param string $key The key of the value to update.
-     * @param mixed $value The new value.
+     * @param string $key The key to store the value under.
+     * @param mixed $value The value to add.
+     * @param int $limit The maximum number of values to store (default: 20).
+     * @param int|null $expiration Expiration time in minutes (optional).
      * @return void
      */
-    public static function update($key, $value) {
-        if (self::exists($key)) {
-            self::$storage[$key]['value'] = $value;
+    public static function limitizer($key, $value, $limit = 20, $expiration = null) {
+        self::init();
+        self::expireAllExpired();
+    
+        if (!isset(self::$data[$key])) {
+            self::$data[$key] = [];
         }
+    
+        array_unshift(self::$data[$key], ['value' => $value, 'expiration' => self::calculateExpiration($expiration)]);
+    
+        if (count(self::$data[$key]) > $limit) {
+            self::$data[$key] = array_slice(self::$data[$key], 0, $limit);
+        }
+    
+        self::save();
     }
 
     /**
-     * Remove a value associated with a key from the storage.
+     * Update the value and expiration of an existing key.
      *
-     * @param string $key The key of the value to remove.
+     * @param string $key The nested key string.
+     * @param mixed $value The new value.
+     * @param int|null $expiration New expiration time in minutes (optional).
+     * @return void
+     */
+    public static function update($key, $value, $expiration = null) {
+        self::init();
+        $keys = self::parseNestedKey($key);
+        $dataPointer = &self::$data;
+
+        foreach ($keys as $keyPart) {
+            if (!isset($dataPointer[$keyPart])) {
+                return;
+            }
+            $dataPointer = &$dataPointer[$keyPart];
+        }
+
+        $dataPointer = [
+            'value' => $value,
+            'expiration' => self::calculateExpiration($expiration)
+        ];
+
+        self::save();
+    }
+
+    /**
+     * Remove a specific nested key from the data storage.
+     *
+     * @param string $key The nested key string.
      * @return void
      */
     public static function remove($key) {
-        if (self::exists($key)) {
-            unset(self::$storage[$key]);
+        self::init();
+        self::expireAllExpired();
+        $keys = self::parseNestedKey($key);
+        $dataPointer = &self::$data;
+
+        foreach ($keys as $keyPart) {
+            if (!isset($dataPointer[$keyPart])) {
+                return;
+            }
+            $lastPointer = &$dataPointer;
+            $dataPointer = &$dataPointer[$keyPart];
         }
+
+        unset($lastPointer[$keyPart]);
+        self::save();
     }
 
     /**
-     * Check if a value associated with a key has expired.
+     * Retrieve the value for a given nested key.
      *
-     * @param string $key The key of the value to check.
-     * @return bool True if the value has expired, false otherwise.
-     */
-    public static function expired($key) {
-        if (self::exists($key)) {
-            return self::$storage[$key]['expiration'] <= time();
-        }
-        return true;
-    }
-
-    /**
-     * Check if a value associated with a key is still active.
-     *
-     * @param string $key The key of the value to check.
-     * @return bool True if the value is active, false if it has expired or doesn't exist.
-     */
-    public static function active($key) {
-        return !self::expired($key);
-    }
-
-    /**
-     * Retrieve a value associated with a key if it is still active.
-     *
-     * @param string $key The key of the value to retrieve.
-     * @return mixed|null The value if active, or null if it has expired or doesn't exist.
+     * @param string $key The nested key string.
+     * @return mixed|null The value or null if not found or expired.
      */
     public static function get($key) {
-        if (self::active($key)) {
-            return self::$storage[$key]['value'];
-        }
-        return null;
-    }
-
-    /**
-     * Get details of all expired values in the storage.
-     *
-     * @return array An associative array containing details of expired values.
-     */
-    public static function getExpiredDetails() {
-        $expiredDetails = [];
-        foreach (self::$storage as $key => $data) {
-            if (self::expired($key)) {
-                $expiredDetails[$key] = $data;
+        self::init();
+        $keys = self::parseNestedKey($key);
+        $dataPointer = self::$data;
+    
+        foreach ($keys as $keyPart) {
+            if (isset($dataPointer[$keyPart])) {
+                $dataPointer = $dataPointer[$keyPart];
+            } else {
+                return null;
             }
         }
-        return $expiredDetails;
+    
+        if (is_array($dataPointer)) {
+            $validValues = array_filter($dataPointer, function ($item) {
+                return !self::isExpired($item);
+            });
+    
+            if (count($validValues) > 1) {
+                return array_column($validValues, 'value');
+            }
+    
+            $singleValue = reset($validValues);
+            return $singleValue ? $singleValue['value'] : null;
+        }
+    
+        return self::isExpired($dataPointer) ? null : $dataPointer['value'];
     }
 
     /**
-     * Mark a value associated with a key as expired.
+     * Get all key-value pairs from the data storage.
      *
-     * @param string $key The key of the value to mark as expired.
+     * @return array The entire data storage.
+     */
+    public static function getAll() {
+        self::init();
+        self::expireAllExpired();
+        return self::$data;
+    }
+
+    /**
+     * Expire a specific key immediately.
+     *
+     * @param string $key The key to expire.
      * @return void
      */
-    public static function makeExpired($key) {
+    public static function expire($key) {
         if (self::exists($key)) {
-            self::$storage[$key]['expiration'] = time() - 1;
+            self::$data[$key]['expiration'] = time();
+            self::save();
         }
     }
 
     /**
-     * Mark all values in the storage as expired.
+     * Expire all keys immediately.
      *
      * @return void
      */
-    public static function expiredAll() {
-        foreach (self::$storage as $key => $data) {
-            self::makeExpired($key);
+    public static function expireAll() {
+        foreach (self::$data as $key => $value) {
+            self::$data[$key]['expiration'] = time();
         }
+        self::save();
     }
 
     /**
-     * Remove all values from the storage.
+     * Get details of all expired keys.
+     *
+     * @return array The expired key-value pairs.
+     */
+    public static function getExpiredDetails() {
+        $expired = [];
+        foreach (self::$data as $key => $value) {
+            if (isset($value['expiration']) && $value['expiration'] !== null && $value['expiration'] <= time()) {
+                $expired[$key] = $value;
+            }
+        }
+        return $expired;
+    }
+
+    /**
+     * Get details of all active keys.
+     *
+     * @return array The active key-value pairs.
+     */
+    public static function getActiveDetails() {
+        $active = [];
+        foreach (self::$data as $key => $value) {
+            if ($value['expiration'] === null || $value['expiration'] > time()) {
+                $active[$key] = $value;
+            }
+        }
+        return $active;
+    }
+
+    /**
+     * Remove all keys from the data storage.
      *
      * @return void
      */
     public static function removeAll() {
-        self::$storage = [];
+        self::$data = [];
+        self::save();
     }
 
     /**
-     * Make all expired values inactive.
+     * Remove all expired keys from the data storage.
      *
      * @return void
      */
-    public static function activeAll() {
-        foreach (self::$storage as $key => $data) {
-            if (self::expired($key)) {
-                self::remove($key);
-            }
-        }
+    public static function expireAllExpired() {
+        self::$data = self::cleanExpired(self::$data);
+        self::save();
     }
-
+    
     /**
-     * Retrieve all active values from the storage.
+     * Check if a key exists in the data storage.
      *
-     * @return array An associative array containing active values.
-     */
-    public static function getAll() {
-        $activeData = [];
-        foreach (self::$storage as $key => $data) {
-            if (self::active($key)) {
-                $activeData[$key] = $data['value'];
-            }
-        }
-        return $activeData;
-    }
-
-    /**
-     * Check if a value associated with a key exists in the storage.
-     *
-     * @param string $key The key to check.
+     * @param string $key The nested key string.
      * @return bool True if the key exists, false otherwise.
      */
     private static function exists($key) {
-        return isset(self::$storage[$key]);
+        self::init();
+        $keys = self::parseNestedKey($key);
+        $dataPointer = self::$data;
+
+        foreach ($keys as $keyPart) {
+            if (isset($dataPointer[$keyPart])) {
+                $dataPointer = $dataPointer[$keyPart];
+            } else {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
-     * Calculate the expiration time based on the provided minutes.
+     * Recursively remove expired or empty entries from an array.
+     * If all values under a key are expired or empty, remove the key as well.
      *
-     * @param int|null $expiration The expiration time in minutes.
-     * @return int The calculated expiration time as a Unix timestamp.
+     * @param array $data The data array to clean.
+     * @return array Cleaned data array.
+     */
+    private static function cleanExpired($data) {
+        foreach ($data as $key => $value) {
+            if (is_array($value) && isset($value['expiration'])) {
+                if (self::isExpired($value)) {
+                    unset($data[$key]);
+                }
+            } elseif (is_array($value)) {
+                $data[$key] = self::cleanExpired($value);
+
+                if (empty($data[$key])) {
+                    unset($data[$key]);
+                }
+            }
+        }
+        return $data;
+    }
+
+    /**
+     * Calculate the expiration timestamp based on the given expiration time in minutes.
+     *
+     * @param int|null $expiration Expiration time in minutes.
+     * @return int|null Expiration timestamp or null if not set.
      */
     private static function calculateExpiration($expiration) {
-        if ($expiration === null) {
-            return PHP_INT_MAX;
-        }
-        return time() + ($expiration * 60);
+        return $expiration !== null ? time() + ($expiration * 60) : null;
+    }
+
+    /**
+     * Check if a value is expired.
+     *
+     * @param array $value The value array.
+     * @return bool True if expired, false otherwise.
+     */
+    private static function isExpired($value) {
+        return $value['expiration'] !== null && $value['expiration'] <= time();
     }
 }
+
 ?>
