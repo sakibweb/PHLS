@@ -342,8 +342,10 @@ class PHLS {
      * @return bool True if expired, false otherwise.
      */
     private static function isExpired($value) {
-        return $value['expiration'] !== null && $value['expiration'] <= time();
+        if (is_array($value) && isset($value['expiration'])) {
+            return $value['expiration'] !== null && $value['expiration'] <= time();
+        }
+        return false;
     }
 }
-
 ?>
